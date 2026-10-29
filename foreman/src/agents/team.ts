@@ -25,7 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { ClaudeConfig } from '../config.js';
 import { FOREMAN_VERSION } from '../config.js';
-import { ClientError, type Backend, type Foreman } from '../foreman.js';
+import { ClientError, type AgentAction, type Backend, type Foreman } from '../foreman.js';
 import { withGitSafety } from '../gitsafety.js';
 import { agentGitIdentity } from '../util/git.js';
 import { classifyToolUse, describeRuleKey, describeToolCall } from '../policy.js';
@@ -41,13 +41,14 @@ import { fetchPulls, githubOrigin, prRefs, pullBriefs, type PullRequest } from '
 import type { Engine, EngineId, PermissionGate, Role, TurnStats } from './engine.js';
 import { agentTools, type ToolHooks, type TurnHandle } from './tools.js';
 import { modelLabel } from './models.js';
+import { claudeMcpServers, selectedSkills, skillsNote, type SkillInfo } from '../skills.js';
 import { userName } from '../user.js';
 
 // policy: our own team tools are trusted (the Claude engine exposes them as this MCP server)
 const TEAM_MCP_SERVER = 'agentcraft';
 
 type JobKind = 'plan' | 'work' | 'review' | 'followup';
-type AbortReason = 'pause' | 'stop' | 'shutdown' | 'cancel' | 'timeout';
+type AbortReason = 'pause' | 'stop' | 'shutdown' | 'cancel' | 'timeout' | 'nudge';
 
 interface Job {
   kind: JobKind;
@@ -102,6 +103,13 @@ function alive(child: ChildProcess | undefined): child is ChildProcess {
 }
 
 const TURN_TIMEOUT_MS = 45 * 60_000;
+const NUDGE_PROMPT = 'Your previous turn stopped making progress and was restarted. Check where you were (git status, your last edits), then continue your current job. If you are stuck on something only the user can decide, use ask_user.';
+
+/** Appended to every agent's instructions when the user picked a language other than English. */
+function languageNote(lang: string): string {
+  if (lang !== 'it') return '';
+  return '\n\nLanguage: the user speaks Italian. Write everything the user reads in Italian: messages, questions (ask_user), report_status lines, task titles and summaries, memory entries. Code, identifiers, commit messages and file contents follow the repository\'s own conventions.';
+}
 const LEAD = 'marlow';
 
 /**
@@ -155,6 +163,9 @@ export class TeamBackend implements Backend {
   private tickTimer: NodeJS.Timeout | undefined;
   private authFailed = false;
   private stopping = false;
+  private watchdog: NodeJS.Timeout | undefined;
+  /** agents already reported as stalled in their current quiet spell */
+  private stallNotified = new Set<string>();
   private waitingUser = new Set<string>();
   private hooks: ToolHooks;
   private lastCost = new Map<string, number>();
@@ -269,6 +280,7 @@ export class TeamBackend implements Backend {
     const spent = Object.values(this.fm.store.data.sessions).reduce((sum, s) => sum + (s.costUsd || 0), 0);
     if (spent > 0) this.fm.setStatus({ costUsd: Math.round(spent * 1000) / 1000 });
     this.showEngines();
+    this.startWatchdog();
     await this.checkAuth();
     this.showEngines(); // the auth check may have learned the configured model
     if (!this.cfg.resumeOnStart) {
@@ -398,6 +410,7 @@ export class TeamBackend implements Backend {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    if (this.watchdog) clearInterval(this.watchdog);
     if (this.tickTimer) clearTimeout(this.tickTimer);
     if (this.retryTimer) clearTimeout(this.retryTimer);
     const turns = [...this.running.values()];
@@ -407,6 +420,68 @@ export class TeamBackend implements Backend {
     await Promise.race([Promise.allSettled(turns.map((r) => this.reap(r, 1500))), sleep(3000)]);
     // inflight entries stay persisted so the next start resumes them
     this.fm.store.markDirty();
+  }
+
+  // ---- your skills and MCP servers ----------------------------------------------------------
+
+  private skillsFor(agentId: string): SkillInfo[] {
+    const engine = this.engineFor(agentId).id;
+    return engine === 'codex' ? selectedSkills('codex', this.fm.config.codex.skills) : selectedSkills('claude', this.cfg.skills);
+  }
+
+  /** Claude Code loads ~/.claude/skills itself; a picked skill from ~/.agents/skills is pointed to. */
+  private claudeExtraSkills(): string {
+    const own = path.join(os.homedir(), '.claude', 'skills');
+    return skillsNote(selectedSkills('claude', this.cfg.skills).filter((s) => path.dirname(s.dir) !== own));
+  }
+
+  /**
+   * With your ~/.claude settings loaded, Claude Code starts every user-scope MCP server of yours;
+   * the ones you did not pick (and do not trust) are refused, so the checkboxes mean what they say.
+   */
+  private unpickedClaudeMcp(): string[] {
+    if (!this.cfg.userSettings || this.cfg.mcp === 'all') return [];
+    const picked = new Set([...this.cfg.mcp, ...this.cfg.trustedMcp, ...Object.keys(this.cfg.mcpServers)]);
+    return claudeMcpServers().filter((s) => !picked.has(s.name)).map((s) => s.name);
+  }
+
+  // ---- stall watchdog -----------------------------------------------------------------------
+
+  /**
+   * A running turn that shows no activity at all (no tool call, no text) for `stallMinutes` is
+   * reported once: feed + toast, so it is visible in game and on the dashboard. With
+   * `stallAction: nudge` the turn is also restarted on the same session. Waiting on you (an open
+   * question or permission prompt) never counts as stalled.
+   */
+  private startWatchdog(): void {
+    const minutes = this.fm.config.stallMinutes;
+    if (!minutes || this.watchdog) return;
+    this.watchdog = setInterval(() => this.checkStalls(minutes * 60_000), Math.min(60_000, minutes * 15_000));
+    this.watchdog.unref?.();
+  }
+
+  checkStalls(limitMs: number, now = Date.now()): string[] {
+    const stalled: string[] = [];
+    for (const [agentId, r] of this.running) {
+      if (r.reason) continue;
+      const waiting = this.fm.decisions.open().some((d) => d.agentId === agentId && d.kind !== 'merge');
+      const last = Math.max(this.fm.lastActivity(agentId), r.spawnedAt ?? 0, this.st.inflight[agentId]?.startedAt ?? 0);
+      if (waiting || !last || now - last < limitMs) {
+        if (now - last < limitMs) this.stallNotified.delete(agentId);
+        continue;
+      }
+      stalled.push(agentId);
+      if (this.stallNotified.has(agentId)) continue;
+      this.stallNotified.add(agentId);
+      const mins = Math.round((now - last) / 60_000);
+      const name = this.fm.nameOf(agentId);
+      const nudge = this.fm.config.stallAction === 'nudge';
+      this.fm.agentLog(agentId, 'error', `no activity for ${mins} min${nudge ? ': restarting the turn' : ''}`);
+      this.fm.bus.feed('error', `${name} shows no activity for ${mins} min${nudge ? ' - restarting the turn' : ` - /nudge @${agentId} to restart the turn`}`, { agentId });
+      this.fm.notify('warn', `${name} seems stuck: no activity for ${mins} min`);
+      if (nudge) this.abortTurn(r, 'nudge');
+    }
+    return stalled;
   }
 
   // ---- turn teardown ------------------------------------------------------------------------
@@ -674,10 +749,14 @@ export class TeamBackend implements Backend {
       const verdict = classifyToolUse(toolName, input, {
         role,
         cwd,
-        readDirs: [this.fm.memory.dir],
+        // the skills you picked for this agent's engine: their SKILL.md and references read freely
+        readDirs: [this.fm.memory.dir, ...this.skillsFor(agentId).map((s) => s.dir)],
         alwaysAllow: this.fm.store.data.permissionRules[agentId] ?? [],
         mcpServer: TEAM_MCP_SERVER,
         leadReadCommands: this.cfg.leadReadCommands,
+        allowSkills: this.cfg.skills !== 'off',
+        trustedMcp: this.cfg.trustedMcp,
+        blockedMcp: this.unpickedClaudeMcp(),
       });
       if (verdict.action === 'allow') return { allow: true };
       if (verdict.action === 'deny') {
@@ -783,6 +862,7 @@ export class TeamBackend implements Backend {
         const t = this.fm.tasks.require(job.taskId!);
         systemAppend = workerSystemPrompt(this.fm, agentId, this.fm.repos.requireWorktree(t.repoId!, t.worktree!));
       }
+      systemAppend += languageNote(this.fm.config.language) + (engine.id === 'claude' ? this.claudeExtraSkills() : '');
       const model = engine.model(role);
       this.fm.agentLog(agentId, 'text', `${resume ? 'Resuming' : 'Starting'} ${job.kind}${job.taskId ? ` ${job.taskId}` : ''} (${engine.id === 'claude' ? model : `${engine.label} ${model}`})`);
       if (job.kind === 'followup' || job.resumed) this.fm.agentLog(agentId, 'text', truncate(job.prompt, 400));
@@ -845,7 +925,10 @@ export class TeamBackend implements Backend {
     if (reason) void this.reap(entry);
     delete this.st.inflight[agentId];
     this.fm.store.markDirty();
-    if (reason === 'pause') {
+    if (reason === 'nudge') {
+      // a stuck turn: the same job again right away, on the same session
+      this.enqueue({ ...job, fresh: false, resumed: true, prompt: NUDGE_PROMPT });
+    } else if (reason === 'pause') {
       const next: Job = { ...job, fresh: false, resumed: true, prompt: `${userName()} paused you and has now resumed you. Any question you had open was withdrawn; ask again if you still need it. Continue your current job.` };
       // resume may already have arrived while the aborted turn was unwinding
       if (this.fm.agent(agentId)?.paused) {
@@ -865,7 +948,7 @@ export class TeamBackend implements Backend {
     }
     this.pump(agentId);
     // the user's messages that came after the agent's last tool call: answer them now
-    if (reason !== 'stop' && reason !== 'pause') this.deliverPending(agentId);
+    if (reason !== 'stop' && reason !== 'pause' && reason !== 'nudge') this.deliverPending(agentId);
     this.tick();
   }
 
@@ -1178,10 +1261,24 @@ export class TeamBackend implements Backend {
     for (const d of this.fm.decisions.open().filter((x) => x.agentId === agentId && x.kind !== 'merge')) this.fm.decisions.cancel(d.id, why);
   }
 
-  async onAgentAction(agentId: string, action: 'pause' | 'resume' | 'stop' | 'spawn'): Promise<void> {
+  async onAgentAction(agentId: string, action: AgentAction): Promise<void> {
     const r = this.running.get(agentId);
     const name = this.fm.nameOf(agentId);
-    if (action === 'pause') {
+    if (action === 'nudge') {
+      this.stallNotified.delete(agentId);
+      if (r) {
+        this.fm.agentLog(agentId, 'text', `${userName()} nudged you: restarting this turn`);
+        this.abortTurn(r, 'nudge');
+      } else {
+        // idle with work waiting (a paused job, queued jobs, unread messages): pick it up
+        const job = this.pausedJobs.get(agentId);
+        this.pausedJobs.delete(agentId);
+        if (this.fm.agent(agentId)?.paused) this.fm.setAgent(agentId, { paused: false });
+        if (job) this.enqueue(job);
+        else this.pump(agentId);
+        this.deliverPending(agentId);
+      }
+    } else if (action === 'pause') {
       if (r) this.abortTurn(r, 'pause');
       this.fm.setAgent(agentId, { state: 'idle', activity: 'paused' });
     } else if (action === 'resume' || action === 'spawn') {

@@ -187,6 +187,8 @@ Exact option labels: merge decisions use `Merge`, `Request changes`, `Reject`; p
 | `showcase` | boolean | no | sim: holding a static showcase state (`--showcase` or `--showcase late`) |
 | `costUsd` | number | no | claude: estimated spend of this profile (sum over all sessions, survives restarts) |
 | `userName` | string | no | the person the team works for, as the agents address them (UI: "<name> answered") |
+| `language` | string | no | the language the agents talk to the user in: "en" or "it" |
+| `clients` | string[] | no | connected clients by kind, e.g. ["mod", "dashboard"]: tells a dashboard whether the game is connected |
 
 ### <a id="agentlogs"></a>AgentLogs
 
@@ -975,7 +977,7 @@ Pause/resume/stop an agent, or spawn (activate) an off-shift worker.
 | --- | --- | --- | --- |
 | `id` | string | no | client correlation id; the Foreman answers with `ack` {re: id} |
 | `agentId` | string | yes |  |
-| `action` | `pause` \| `resume` \| `stop` \| `spawn` | yes | pause: abort the current turn, keep the task (open questions are withdrawn); resume continues it. stop: off shift (active=false) until resume/spawn: turn aborted, open questions/permission prompts withdrawn, its doing tasks go back to the board and the next worker continues from the same branch. spawn: bring an off-shift agent onto the team. |
+| `action` | `pause` \| `resume` \| `stop` \| `spawn` \| `nudge` | yes | pause: abort the current turn, keep the task (open questions are withdrawn); resume continues it. stop: off shift (active=false) until resume/spawn: turn aborted, open questions/permission prompts withdrawn, its doing tasks go back to the board and the next worker continues from the same branch. spawn: bring an off-shift agent onto the team. nudge: for an agent that seems stuck: its current turn is ended and resumed right away (same session, same job); an idle agent is woken to pick up its pending work. |
 | `arg` | string | no | spawn: optional task id to assign to the agent |
 
 ```json

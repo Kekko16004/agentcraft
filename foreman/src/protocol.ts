@@ -221,6 +221,8 @@ export const ForemanStatus = z.object({
   showcase: z.boolean().optional().describe('sim: holding a static showcase state (`--showcase` or `--showcase late`)'),
   costUsd: z.number().optional().describe('claude: estimated spend of this profile (sum over all sessions, survives restarts)'),
   userName: z.string().optional().describe('the person the team works for, as the agents address them (UI: "<name> answered")'),
+  language: z.string().optional().describe('the language the agents talk to the user in: "en" or "it"'),
+  clients: z.array(z.string()).optional().describe('connected clients by kind, e.g. ["mod", "dashboard"]: tells a dashboard whether the game is connected'),
 });
 export type ForemanStatus = z.infer<typeof ForemanStatus>;
 
@@ -385,9 +387,9 @@ export const AgentActionMsg = z.object({
   ...envelope('agent.action'),
   agentId: Id,
   action: z
-    .enum(['pause', 'resume', 'stop', 'spawn'])
+    .enum(['pause', 'resume', 'stop', 'spawn', 'nudge'])
     .describe(
-      'pause: abort the current turn, keep the task (open questions are withdrawn); resume continues it. stop: off shift (active=false) until resume/spawn: turn aborted, open questions/permission prompts withdrawn, its doing tasks go back to the board and the next worker continues from the same branch. spawn: bring an off-shift agent onto the team.',
+      'pause: abort the current turn, keep the task (open questions are withdrawn); resume continues it. stop: off shift (active=false) until resume/spawn: turn aborted, open questions/permission prompts withdrawn, its doing tasks go back to the board and the next worker continues from the same branch. spawn: bring an off-shift agent onto the team. nudge: for an agent that seems stuck: its current turn is ended and resumed right away (same session, same job); an idle agent is woken to pick up its pending work.',
     ),
   arg: z.string().optional().describe('spawn: optional task id to assign to the agent'),
 });

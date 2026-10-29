@@ -48,8 +48,10 @@ export interface Backend {
    */
   onMergeConflict?(task: Task, info: { base: string; branch: string; files: string[]; reason: string }): boolean;
   onTaskAction(task: Task, action: 'reassign' | 'cancel' | 'retry' | 'prioritize', arg?: string): void;
-  onAgentAction(agentId: string, action: 'pause' | 'resume' | 'stop' | 'spawn', arg?: string): Promise<void> | void;
+  onAgentAction(agentId: string, action: AgentAction, arg?: string): Promise<void> | void;
 }
+
+export type AgentAction = 'pause' | 'resume' | 'stop' | 'spawn' | 'nudge';
 
 export type Reply = (msg: Outbound) => void;
 
@@ -81,6 +83,7 @@ export class Foreman {
 
   private listeners = new Set<(m: Outbound) => void>();
   private logBuffers = new Map<string, LogEntry[]>();
+  private lastLogAt = new Map<string, number>();
   private logTimer: NodeJS.Timeout | undefined;
   private goalTimers = new Set<string>();
   private closed = false;
@@ -103,7 +106,7 @@ export class Foreman {
     this.cast = cast;
     this.log.debug(`cast from ${source}`);
     setUserName(opts.config.userName);
-    this.status = { version: FOREMAN_VERSION, backend: opts.config.backend, auth: opts.config.backend === 'sim' ? 'ok' : 'unknown', userName: userName() };
+    this.status = { version: FOREMAN_VERSION, backend: opts.config.backend, auth: opts.config.backend === 'sim' ? 'ok' : 'unknown', userName: userName(), language: opts.config.language };
     if (opts.config.backend === 'sim') this.status.message = 'Simulated team (sim backend)';
     this.initRoster();
     this.decisions.onCreated((d) => this.onDecisionCreated(d));
@@ -237,10 +240,16 @@ export class Foreman {
 
   // ---- logs ---------------------------------------------------------------------------------
 
+  /** When the agent last logged anything (tool call, text, result) in this run; 0 = never. */
+  lastActivity(agentId: string): number {
+    return this.lastLogAt.get(agentId) ?? 0;
+  }
+
   /** Append a log line to an agent monitor. Batched (~30ms) into agent.log frames. */
   agentLog(agentId: string, kind: LogKind, text: string): void {
     if (this.closed) return;
     const entry: LogEntry = { ts: this.ctx.now(), kind, text: truncate(text.replace(/\r\n/g, '\n'), LOG_TEXT_MAX) };
+    this.lastLogAt.set(agentId, entry.ts);
     this.store.appendLog(agentId, [entry]);
     const buf = this.logBuffers.get(agentId) ?? [];
     buf.push(entry);
@@ -604,7 +613,7 @@ export class Foreman {
     this.backend?.onTaskAction(this.tasks.require(taskId), action, arg);
   }
 
-  async agentAction(agentId: string, action: 'pause' | 'resume' | 'stop' | 'spawn', arg?: string): Promise<void> {
+  async agentAction(agentId: string, action: AgentAction, arg?: string): Promise<void> {
     const id = this.resolveAgentId(agentId);
     if (!id) throw new ClientError(`no agent named "${agentId}"`);
     if (action === 'pause') this.setAgent(id, { paused: true });
