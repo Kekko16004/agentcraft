@@ -205,3 +205,17 @@ details.adv summary { cursor: pointer; color: var(--muted); margin: 6px 0; }
   .composer select { max-width: none; width: 100%; }
   .kanban { grid-template-columns: repeat(5, 78vw); }
 }
+
+/* permissions, models, variants */
+.switch { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+.rule { display: flex; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.rule .who { min-width: 90px; font-weight: 600; }
+.rule .what { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.models { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+.models label { flex-direction: column; }
+.variants { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin: 8px 0; }
+.variant { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--paper); cursor: pointer; display: flex; flex-direction: column; }
+.variant:hover { border-color: var(--clay); }
+.variant .thumb { height: 160px; overflow: hidden; position: relative; background: #fff; }
+.variant iframe { width: 1280px; height: 800px; border: 0; transform: scale(.18); transform-origin: 0 0; pointer-events: none; }
+.variant .cap { padding: 6px 8px; font-size: 12.5px; }

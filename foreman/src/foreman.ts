@@ -26,6 +26,10 @@ import type {
   Station,
   Task,
 } from './protocol.js';
+import { localize, setLanguage } from './i18n.js';
+import { describeRuleKey } from './policy.js';
+import { publish } from './publish.js';
+import { VARIANT_TOOL, VariantBridge } from './variants.js';
 import { RepoError, RepoManager } from './repos.js';
 import { Store } from './store.js';
 import { TaskError, TaskGraph } from './taskgraph.js';
@@ -84,6 +88,8 @@ export class Foreman {
   private listeners = new Set<(m: Outbound) => void>();
   private logBuffers = new Map<string, LogEntry[]>();
   private lastLogAt = new Map<string, number>();
+  /** design picks from Variant Studio rounds, answered here instead of in the browser */
+  readonly variants = new VariantBridge(this);
   private logTimer: NodeJS.Timeout | undefined;
   private goalTimers = new Set<string>();
   private closed = false;
@@ -106,6 +112,7 @@ export class Foreman {
     this.cast = cast;
     this.log.debug(`cast from ${source}`);
     setUserName(opts.config.userName);
+    setLanguage(opts.config.language);
     this.status = { version: FOREMAN_VERSION, backend: opts.config.backend, auth: opts.config.backend === 'sim' ? 'ok' : 'unknown', userName: userName(), language: opts.config.language };
     if (opts.config.backend === 'sim') this.status.message = 'Simulated team (sim backend)';
     this.initRoster();
@@ -352,7 +359,8 @@ export class Foreman {
   // ---- decisions ----------------------------------------------------------------------------
 
   createDecision(input: CreateDecisionInput): Decision {
-    return this.decisions.create(input);
+    // the questions the Foreman words itself (permission, merge) in the user's language
+    return this.decisions.create(input.kind === 'question' ? input : { ...input, question: localize(input.question) });
   }
 
   private onDecisionCreated(d: Decision): void {
@@ -367,7 +375,7 @@ export class Foreman {
     const m: Outbound = {
       type: 'notify',
       level,
-      text,
+      text: localize(text),
       ts: this.ctx.now(),
       ...(decisionId ? { decisionId } : {}),
     };
@@ -382,6 +390,18 @@ export class Foreman {
     } catch (e) {
       if (e instanceof DecisionError) throw new ClientError(e.message);
       throw e;
+    }
+    if (d.tool === VARIANT_TOOL) {
+      // a design pick goes to the Variant Studio gallery, where the agent waits for it
+      try {
+        await this.variants.forward(d);
+      } catch (e) {
+        this.decisions.reopen(d.id);
+        throw new ClientError((e as Error).message);
+      }
+      this.decisions.settle(d.id);
+      this.bus.feed('decision', `${userName()} picked for ${this.nameOf(d.agentId)}: ${[d.answer?.option, d.answer?.text].filter(Boolean).join(' — ')}`, { agentId: 'user', to: d.agentId });
+      return d;
     }
     const answerText = [d.answer?.option, d.answer?.text].filter(Boolean).join(' — ');
     this.bus.feed('decision', `${userName()} answered ${this.nameOf(d.agentId)}: ${answerText}`, { agentId: 'user', to: d.agentId });
@@ -542,6 +562,20 @@ export class Foreman {
         }
         return undefined;
       }
+      case 'permissions':
+        return this.permissions(msg.action, msg);
+      case 'repo.publish': {
+        const repo = this.repos.get(msg.repoId);
+        if (!repo) throw new ClientError(`no repo "${msg.repoId}"`);
+        let res;
+        try {
+          res = await publish(repo.path, repo.branch, { ...(msg.pr ? { pr: true } : {}), ...(msg.title ? { title: msg.title } : {}), ...(msg.body ? { body: msg.body } : {}) });
+        } catch (e) {
+          throw new ClientError((e as Error).message);
+        }
+        this.bus.feed('merge', `${userName()} pushed ${res.pushed} to ${res.remote}${res.prUrl ? `: pull request ${res.prUrl}` : res.compareUrl ? ` (open the pull request: ${res.compareUrl})` : ''}`, { agentId: 'user' });
+        return { ...res };
+      }
       case 'repo.add': {
         const r = await this.repos.add(msg.path);
         this.bus.feed('system', `Repo connected: ${r.name} (${r.branch})`);
@@ -627,6 +661,36 @@ export class Foreman {
     if (action === 'spawn' && arg) this.taskAction(arg, 'reassign', id);
   }
 
+  // ---- permissions ----------------------------------------------------------------------------
+
+  permissionMode(): 'ask' | 'allow_all' {
+    return this.store.data.permissionMode ?? this.config.permissionMode;
+  }
+
+  /** The dashboard's view of the "Always allow" rules and the allow-all switch. */
+  permissions(action: 'list' | 'mode' | 'revoke' | 'clear', a: { mode?: 'ask' | 'allow_all'; agentId?: string; key?: string }): Record<string, unknown> {
+    const rules = this.store.data.permissionRules;
+    if (action === 'mode') {
+      if (!a.mode) throw new ClientError('mode needs ask or allow_all');
+      this.store.data.permissionMode = a.mode;
+      this.store.markDirty();
+      this.setStatus({ permissionMode: a.mode });
+      this.bus.feed('system', a.mode === 'allow_all' ? `${userName()} turned on allow-all: agents no longer ask for permission (git push stays refused)` : `${userName()} turned off allow-all: agents ask again`, { agentId: 'user' });
+      // prompts already waiting are allowed too
+      if (a.mode === 'allow_all') for (const d of this.decisions.open().filter((x) => x.kind === 'permission')) void this.answerDecision(d.id, 'Allow once').catch(() => undefined);
+    } else if (action === 'revoke') {
+      if (!a.agentId || !a.key) throw new ClientError('revoke needs agentId and key');
+      rules[a.agentId] = (rules[a.agentId] ?? []).filter((k) => k !== a.key);
+      this.store.markDirty();
+    } else if (action === 'clear') {
+      if (a.agentId) delete rules[a.agentId];
+      else for (const k of Object.keys(rules)) delete rules[k];
+      this.store.markDirty();
+    }
+    const list = Object.entries(rules).flatMap(([agentId, keys]) => keys.map((key) => ({ agentId, key, description: describeRuleKey(key) })));
+    return { mode: this.permissionMode(), rules: list };
+  }
+
   // ---- lifecycle ----------------------------------------------------------------------------
 
   async start(backend: Backend): Promise<void> {
@@ -647,13 +711,16 @@ export class Foreman {
       await this.repos.refresh(r.id).catch((e) => this.log.warn(`refresh ${r.id}: ${(e as Error).message}`));
     }
     this.repos.startPolling(this.config.repoPollMs);
+    this.setStatus({ permissionMode: this.permissionMode() });
     await backend.start();
+    this.variants.start();
   }
 
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     this.repos.stopPolling();
+    this.variants.stop();
     try {
       await this.backend?.stop();
     } catch (e) {

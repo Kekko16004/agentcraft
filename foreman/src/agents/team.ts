@@ -235,7 +235,7 @@ export class TeamBackend implements Backend {
     for (const a of this.fm.agents()) {
       const engine = this.engineFor(a.id);
       const reported = this.reportedModels.get(a.id);
-      const model = (reported?.engine === engine.id ? reported.label : undefined) ?? modelLabel(engine.model(a.id === LEAD ? 'lead' : 'worker')) ?? engine.label;
+      const model = (reported?.engine === engine.id ? reported.label : undefined) ?? modelLabel(engine.model(a.id === LEAD ? 'lead' : 'worker', a.id)) ?? engine.label;
       this.fm.setAgent(a.id, { engine: engine.id, model });
     }
   }
@@ -326,7 +326,8 @@ export class TeamBackend implements Backend {
   }
 
   private openQuestion(agentId: string): Decision | undefined {
-    return this.fm.decisions.open().find((d) => d.kind === 'question' && d.agentId === agentId);
+    // a Variant Studio pick is not an ask_user: the agent waits on the gallery, not on us
+    return this.fm.decisions.open().find((d) => d.kind === 'question' && d.agentId === agentId && d.tool !== 'variant-studio');
   }
 
   /** A job matching `pred` is queued, running or paused (waiting for /resume) for this agent. */
@@ -751,7 +752,7 @@ export class TeamBackend implements Backend {
         cwd,
         // the skills you picked for this agent's engine: their SKILL.md and references read freely
         readDirs: [this.fm.memory.dir, ...this.skillsFor(agentId).map((s) => s.dir)],
-        alwaysAllow: this.fm.store.data.permissionRules[agentId] ?? [],
+        alwaysAllow: [...(this.fm.store.data.permissionRules[agentId] ?? []), ...(this.fm.store.data.permissionRules['*'] ?? [])],
         mcpServer: TEAM_MCP_SERVER,
         leadReadCommands: this.cfg.leadReadCommands,
         allowSkills: this.cfg.skills !== 'off',
@@ -759,6 +760,10 @@ export class TeamBackend implements Backend {
         blockedMcp: this.unpickedClaudeMcp(),
       });
       if (verdict.action === 'allow') return { allow: true };
+      if (verdict.action === 'ask' && this.fm.permissionMode() === 'allow_all') {
+        this.fm.agentLog(agentId, 'result', `allowed (allow-all mode): ${describeToolCall(toolName, input)}`);
+        return { allow: true };
+      }
       if (verdict.action === 'deny') {
         this.fm.agentLog(agentId, 'error', `blocked: ${describeToolCall(toolName, input)} (${verdict.reason})`);
         return { allow: false, message: verdict.reason };
@@ -785,11 +790,11 @@ export class TeamBackend implements Backend {
       if (signal.aborted) return { allow: false, message: 'The turn was stopped.' };
       if (prevState) this.fm.setAgent(agentId, prevState);
       const opt = res.answer?.option;
-      if (res.status === 'answered' && (opt === PERMISSION_OPTIONS[0] || opt === PERMISSION_OPTIONS[1])) {
-        if (opt === PERMISSION_OPTIONS[1]) {
+      if (res.status === 'answered' && (opt === PERMISSION_OPTIONS[0] || opt === PERMISSION_OPTIONS[1] || opt === PERMISSION_OPTIONS[3])) {
+        if (opt === PERMISSION_OPTIONS[1] || opt === PERMISSION_OPTIONS[3]) {
           // every key the call needed: each is scoped (see policy.ts), so this grants exactly
-          // what the prompt listed
-          const rules = (this.fm.store.data.permissionRules[agentId] ??= []);
+          // what the prompt listed - to this agent, or to every agent ("*")
+          const rules = (this.fm.store.data.permissionRules[opt === PERMISSION_OPTIONS[3] ? '*' : agentId] ??= []);
           for (const k of verdict.ruleKeys) if (!rules.includes(k)) rules.push(k);
           this.fm.store.markDirty();
         }
@@ -863,7 +868,7 @@ export class TeamBackend implements Backend {
         systemAppend = workerSystemPrompt(this.fm, agentId, this.fm.repos.requireWorktree(t.repoId!, t.worktree!));
       }
       systemAppend += languageNote(this.fm.config.language) + (engine.id === 'claude' ? this.claudeExtraSkills() : '');
-      const model = engine.model(role);
+      const model = engine.model(role, agentId);
       this.fm.agentLog(agentId, 'text', `${resume ? 'Resuming' : 'Starting'} ${job.kind}${job.taskId ? ` ${job.taskId}` : ''} (${engine.id === 'claude' ? model : `${engine.label} ${model}`})`);
       if (job.kind === 'followup' || job.resumed) this.fm.agentLog(agentId, 'text', truncate(job.prompt, 400));
       const timer = setTimeout(() => this.abortTurn(entry, 'timeout'), TURN_TIMEOUT_MS);

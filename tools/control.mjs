@@ -506,6 +506,11 @@ function saveForemanConfig(patch) {
   }
   if ('stallMinutes' in patch) next['stall-minutes'] = Number(patch.stallMinutes);
   if ('stallAction' in patch) next['stall-action'] = patch.stallAction;
+  if ('models' in patch) {
+    const models = Object.fromEntries(Object.entries(patch.models ?? {}).filter(([k, v]) => /^[\w-]+$/.test(k) && typeof v === 'string' && v.trim()).map(([k, v]) => [k, v.trim()]));
+    if (Object.keys(models).length) next.models = models;
+    else delete next.models;
+  }
   const empty = (v) => v === null || v === undefined || v === '' || (Array.isArray(v) && !v.length) || (v && typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length);
   const section = (name, keys, from) => {
     const out = { ...(cur[name] ?? {}) };

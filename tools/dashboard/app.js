@@ -87,6 +87,7 @@
       S.logs = new Map(m.logs.map((l) => [l.agentId, l.entries.slice()]));
       for (const l of m.logs) for (const e of l.entries) scanUrls(e.text, l.agentId, e.ts);
       for (const f of m.feed) scanUrls(f.text, f.agentId, f.ts);
+      if (S.view === 'permissions') setTimeout(() => void loadRules(), 0);
       return;
     }
     if (m.type === 'ack' || (m.type === 'error' && m.re)) {
@@ -230,6 +231,7 @@
       if (v === 'decisions') renderDecisions();
       if (v === 'browser') renderBrowser();
       if (v === 'memory') renderMemory();
+      if (v === 'permissions') renderPermissions();
       if (v === 'repos') renderRepos();
       if (v === 'services') renderServices();
     });
@@ -253,6 +255,7 @@
     if (f) {
       parts.push(pill(f.auth === 'failed' ? 'bad' : f.auth === 'ok' ? 'ok' : 'warn', `${f.backend}${f.account ? ` · ${f.account}` : ''}`, f.message ?? ''));
       if (f.costUsd !== undefined) parts.push(pill('', `${t('spend')} $${f.costUsd.toFixed(2)}`));
+      if (f.permissionMode === 'allow_all') parts.push(pill('warn', t('p.allowAllOn')));
       const open = (S.snap.decisions ?? []).filter((d) => d.status === 'open').length;
       if (open) parts.push(pill('warn pulse', `${open} ${t('nav.decisions').toLowerCase()}`));
     }
@@ -461,7 +464,8 @@
       return `<div class="decision ${done ? 'done' : ''}" data-decision="${esc(d.id)}">
         <div class="meta muted">${esc(d.id)} · ${esc(t(`k.${d.kind}`))} · ${esc(nameOf(d.agentId))} · ${time(d.createdAt)}${done ? ` · ${esc(t(`d.${d.status}`))}${answer}` : ''}</div>
         <div class="q">${linkify(d.question)}</div>
-        ${d.context && !compact ? `<pre>${linkify(d.context)}</pre>` : d.context ? `<details><summary class="muted">context</summary><pre>${linkify(d.context)}</pre></details>` : ''}
+        ${variantInfo(d) ? '' : d.context && !compact ? `<pre>${linkify(d.context)}</pre>` : d.context ? `<details><summary class="muted">context</summary><pre>${linkify(d.context)}</pre></details>` : ''}
+        ${done ? '' : variantThumbs(d)}
         ${done ? '' : `
           ${d.kind !== 'permission' ? `<input data-dtext="${esc(d.id)}" placeholder="${esc(t('d.text'))}">` : ''}
           <div class="row">${d.options.map((o, i) => `<button class="btn small ${i === 0 ? 'primary' : ''}" data-answer="${esc(d.id)}" data-option="${esc(o)}">${esc(o)}</button>`).join('')}
@@ -469,6 +473,28 @@
       </div>`;
     }).join('');
   }
+  /** Variant Studio picks: a live thumbnail per variant, rendered by the studio's own gallery server. */
+  function variantInfo(d) {
+    if (d.tool !== 'variant-studio' || !d.context) return null;
+    const gallery = /^Gallery: (http:\/\/127\.0\.0\.1:\d+)\/\?k=(\w+)$/m.exec(d.context);
+    const round = /^Round: ([\w.-]+)$/m.exec(d.context)?.[1];
+    const files = Object.fromEntries((/^Files: (.+)$/m.exec(d.context)?.[1] ?? '').split(',').map((x) => x.split('=')));
+    return gallery && round ? { base: gallery[1], key: gallery[2], round, files } : null;
+  }
+  function variantThumbs(d) {
+    const v = variantInfo(d);
+    if (!v) return '';
+    const items = d.options.slice(0, -1).map((o) => {
+      const id = o.split(' ')[0].toLowerCase();
+      const file = v.files[id] ?? `${id}.html`;
+      const src = `${v.base}/v/${encodeURIComponent(v.round)}/${encodeURIComponent(file)}?k=${v.key}`;
+      return `<div class="variant" data-answer="${esc(d.id)}" data-option="${esc(o)}" title="${esc(t('v.pick'))}">
+        <div class="thumb"><iframe src="${esc(src)}" loading="lazy" tabindex="-1" sandbox="allow-scripts allow-same-origin"></iframe></div>
+        <div class="cap"><b>${esc(o)}</b></div></div>`;
+    });
+    return `<div class="variants">${items.join('')}</div><div class="row"><a class="btn small ghost" href="#" data-url="${esc(`${v.base}/?k=${v.key}`)}">${esc(t('v.gallery'))}</a></div>`;
+  }
+
   function renderDecisions() {
     const s = S.snap;
     const el = $('#decision-list');
@@ -527,6 +553,25 @@
     render();
   }
 
+  // permissions
+  async function loadRules() {
+    const r = await send('permissions', { action: 'list' });
+    if (r.ok) { S.rules = r.result; render(); }
+  }
+  function renderPermissions() {
+    const mode = S.snap?.foreman?.permissionMode ?? S.rules?.mode ?? 'ask';
+    $('#allow-all').checked = mode === 'allow_all';
+    const rules = S.rules?.rules ?? [];
+    const el = $('#rules');
+    const key = JSON.stringify(rules);
+    if (el.dataset.key === key) return;
+    el.dataset.key = key;
+    el.innerHTML = rules.length
+      ? rules.map((r) => `<div class="rule"><span class="who">${esc(r.agentId === '*' ? t('p.every') : nameOf(r.agentId))}</span><span class="what">${esc(r.description)}<br><span class="muted mono">${esc(r.key)}</span></span>
+          <button class="btn small ghost danger" data-revoke="${esc(r.agentId)}" data-key="${esc(r.key)}">${esc(t('p.revoke'))}</button></div>`).join('')
+      : `<p class="muted">${esc(t('p.none'))}</p>`;
+  }
+
   // memory
   function renderMemory() {
     const s = S.snap;
@@ -547,7 +592,8 @@
     if (!s) { el.innerHTML = ''; return; }
     if (!s.repos.length) { el.innerHTML = `<p class="muted">${esc(t('repo.none'))}</p>`; return; }
     el.innerHTML = s.repos.map((r) => `<div class="panel repo">
-      <div class="panel-head"><b>${esc(r.name)}</b><span class="tag">${esc(r.branch)}${r.head ? ` @ ${esc(r.head)}` : ''}</span>${r.dirty ? '<span class="tag warn">dirty</span>' : ''}<span class="tag ${r.ci === 'fail' ? 'bad' : ''}">CI ${esc(r.ci)}</span></div>
+      <div class="panel-head"><b>${esc(r.name)}</b><span class="tag">${esc(r.branch)}${r.head ? ` @ ${esc(r.head)}` : ''}</span>${r.dirty ? '<span class="tag warn">dirty</span>' : ''}<span class="tag ${r.ci === 'fail' ? 'bad' : ''}">CI ${esc(r.ci)}</span>
+        <span style="margin-left:auto;display:flex;gap:6px"><button class="btn small" data-publish="${esc(r.id)}" data-branch="${esc(r.branch)}">${esc(t('r.push'))}</button><button class="btn small primary" data-publish="${esc(r.id)}" data-branch="${esc(r.branch)}" data-pr="1">${esc(t('r.pr'))}</button></span></div>
       <div class="muted mono">${esc(r.path)}</div>
       ${r.worktrees.length ? `<h3>${esc(t('wt.title'))}</h3><table><tr><th>id</th><th>branch</th><th>status</th><th>Δ</th><th></th></tr>${r.worktrees.map((w) => `<tr><td>${esc(w.id)}</td><td class="mono">${esc(w.branch)}</td><td>${esc(w.status)}</td><td>${w.files} files +${w.additions} -${w.deletions}</td><td>${w.status === 'active' ? `<button class="btn small" data-wt-diff="${esc(r.id)}|${esc(w.id)}">${esc(t('diff'))}</button>` : ''}</td></tr>`).join('')}</table>` : ''}
     </div>`).join('');
@@ -632,6 +678,11 @@
     skillPicks($('#codex-skills'), found.codex.skills, cx.skills);
     mcpPicks($('#codex-mcp'), found.codex.mcp, cx.mcp, null);
     for (const b of $$('[data-bulk]')) b.innerHTML = `<button type="button" data-bulk-all="${b.dataset.bulk}">${esc(t('s.all'))}</button><button type="button" data-bulk-none="${b.dataset.bulk}">${esc(t('s.off'))}</button>`;
+    const models = c.models ?? {};
+    const agents = S.snap?.agents ?? [];
+    $('#agent-models').innerHTML = agents.length
+      ? agents.map((a) => `<label><span>${esc(a.name)} <span class="muted">(${esc(a.engine ?? '')} ${esc(a.role)})</span></span><input data-model="${esc(a.id)}" list="model-list" value="${esc(models[a.id] ?? '')}" placeholder="${esc(a.model ?? '')}"></label>`).join('')
+      : `<span class="muted">${esc(t('offlineBanner'))}</span>`;
     f.userSettings.checked = !!cl.userSettings;
     f.plugins.value = asList(cl.plugins).join('\n');
     f.mcpServers.value = cl.mcpServers ? JSON.stringify(cl.mcpServers, null, 2) : '';
@@ -682,6 +733,7 @@
         mcpServers: extra,
       },
       codex: { skills: picked('#codex-skills'), mcp: picked('#codex-mcp', 'input[data-mcp]') },
+      ...($$('#agent-models input').length ? { models: Object.fromEntries($$('#agent-models input').map((i) => [i.dataset.model, i.value.trim()])) } : {}),
     };
     try {
       const r = await api('config', body);
@@ -724,7 +776,17 @@
       S.view = b.dataset.view;
       storage.set('ac.view', S.view);
       if (S.view === 'settings') loadSettings();
+      if (S.view === 'permissions') void loadRules();
       render();
+    });
+    $('#allow-all').addEventListener('change', async (e) => {
+      const r = await act('permissions', { action: 'mode', mode: e.target.checked ? 'allow_all' : 'ask' }, t('ok'));
+      if (r.ok) { S.rules = r.result; render(); }
+    });
+    $('#rules-clear').addEventListener('click', async () => {
+      if (!confirm(t('p.clearAll') + '?')) return;
+      const r = await act('permissions', { action: 'clear' });
+      if (r.ok) { S.rules = r.result; render(); }
     });
     $('#composer').addEventListener('submit', (e) => {
       e.preventDefault();
@@ -749,6 +811,24 @@
       if (bulk) {
         const id = bulk.dataset.bulkAll ?? bulk.dataset.bulkNone;
         for (const b of $$(`#${id} input[type=checkbox]:not([data-trust])`)) b.checked = !!bulk.dataset.bulkAll;
+        return;
+      }
+      const pub = e.target.closest('[data-publish]');
+      if (pub) {
+        const pr = !!pub.dataset.pr;
+        if (!confirm(t(pr ? 'r.confirmPr' : 'r.confirmPush', { b: pub.dataset.branch }))) return;
+        const title = pr ? prompt(t('r.prTitle'), '') ?? '' : '';
+        pub.disabled = true;
+        const r = await act('repo.publish', { repoId: pub.dataset.publish, ...(pr ? { pr: true } : {}), ...(title ? { title } : {}) }, t('r.pushed'));
+        pub.disabled = false;
+        const url = r.ok && (r.result?.prUrl || r.result?.compareUrl);
+        if (url) window.open(url, '_blank', 'noopener');
+        return;
+      }
+      const rev = e.target.closest('[data-revoke]');
+      if (rev) {
+        const r = await act('permissions', { action: 'revoke', agentId: rev.dataset.revoke, key: rev.dataset.key });
+        if (r.ok) { S.rules = r.result; render(); }
         return;
       }
       const el = e.target.closest('[data-url],[data-agent-act],[data-sel-agent],[data-task-act],[data-answer],[data-diff],[data-wt-diff],[data-mem],[data-act],[data-preset]');

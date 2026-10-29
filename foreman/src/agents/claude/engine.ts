@@ -20,8 +20,8 @@ export class ClaudeEngine implements Engine {
     private queryFn: typeof query = query,
   ) {}
 
-  model(role: Role): string {
-    return role === 'lead' ? this.cfg.leadModel : this.cfg.workerModel;
+  model(role: Role, agentId?: string): string {
+    return (agentId && this.fm.config.agentModels[agentId]) || (role === 'lead' ? this.cfg.leadModel : this.cfg.workerModel);
   }
 
   authFailedMessage(detail: string): string {
@@ -76,7 +76,7 @@ export class ClaudeEngine implements Engine {
     };
     const options: Options = {
       cwd,
-      model: this.model(role),
+      model: this.model(role, agentId),
       effort: role === 'lead' ? this.cfg.leadEffort : this.cfg.effort,
       maxTurns: role === 'lead' ? this.cfg.maxTurnsLead : this.cfg.maxTurnsWorker,
       // your own ~/.claude (skills, CLAUDE.md, user MCP servers) only when you turned it on

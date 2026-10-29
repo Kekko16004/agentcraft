@@ -115,6 +115,10 @@ export interface Config {
   stallMinutes: number;
   /** what happens to a stalled agent: tell you (notify) or also restart its turn (nudge) */
   stallAction: 'notify' | 'nudge';
+  /** start mode for permission prompts (the dashboard switch is saved in the profile and wins) */
+  permissionMode: 'ask' | 'allow_all';
+  /** model per agent, overriding the role's model, e.g. {"kit": "haiku"} (any engine) */
+  agentModels: Record<string, string>;
   /** the person the team works for (prompts, feed, UI); default: the OS user name */
   userName: string;
   home: string;
@@ -246,8 +250,26 @@ export const KNOWN_FLAGS = new Set([
   'max-concurrent', 'ci', 'max-budget', 'resume', 'lead-review', 'speed', 'seed', 'showcase', 'auto-answer',
   'ambient', 'lead-read-commands', 'lead-engine', 'worker-engine', 'engines', 'codex-path', 'codex-model', 'codex-lead-model',
   'codex-worker-model', 'codex-effort', 'codex-lead-effort', 'language', 'stall-minutes', 'stall-action', 'skills',
-  'user-settings', 'plugin-dir', 'mcp-config', 'trusted-mcp', 'mcp', 'codex-skills', 'codex-mcp',
+  'user-settings', 'plugin-dir', 'mcp-config', 'trusted-mcp', 'mcp', 'codex-skills', 'codex-mcp', 'permission-mode',
+  'agent-models',
 ]);
+
+function permissionMode(v: unknown): 'ask' | 'allow_all' {
+  if (v === undefined || v === 'ask') return 'ask';
+  if (v === 'allow_all' || v === 'allow-all') return 'allow_all';
+  throw new Error(`unknown permission mode "${String(v)}" (use ask or allow-all)`);
+}
+
+/** "kit=haiku,wren=opus" (flag) or {"kit": "haiku"} (config.json "models") */
+function agentModels(v: unknown): Record<string, string> {
+  const pairs: Array<[string, unknown]> = v && typeof v === 'object' && !Array.isArray(v) ? Object.entries(v as Record<string, unknown>) : list(v).map((e) => e.split('=').map((x) => x.trim()) as [string, string]);
+  const out: Record<string, string> = {};
+  for (const [agent, model] of pairs) {
+    if (!agent || !/^[a-z0-9_-]+$/i.test(agent) || typeof model !== 'string' || !model.trim()) throw new Error(`bad --agent-models entry "${agent}=${String(model)}" (use agent=model, e.g. kit=haiku)`);
+    out[agent.toLowerCase()] = model.trim();
+  }
+  return out;
+}
 
 /** --mcp all|name,name (flag) or "all" / ["playwright"] (config.json); default none */
 function mcpChoice(v: unknown): 'all' | string[] {
@@ -367,6 +389,8 @@ export function loadConfig(argv: string[], env: NodeJS.ProcessEnv = process.env)
     language: language(pick('language', 'AGENTCRAFT_LANGUAGE')),
     stallMinutes: Math.max(0, num(pick('stall-minutes', 'AGENTCRAFT_STALL_MINUTES'), 10)),
     stallAction: stallAction(pick('stall-action', 'AGENTCRAFT_STALL_ACTION')),
+    permissionMode: permissionMode(pick('permission-mode', 'AGENTCRAFT_PERMISSION_MODE')),
+    agentModels: agentModels(flags['agent-models'] ?? env.AGENTCRAFT_AGENT_MODELS ?? file.models),
     userName: (str(pick('user-name', 'AGENTCRAFT_USER_NAME')) ?? str(file.userName))?.trim().slice(0, 40) || defaultUserName(),
     home,
     profile,
@@ -462,6 +486,10 @@ usage: npm run start -- [options]
   --stall-minutes <n>      a running agent with no activity for n minutes is flagged as stalled
                            (default 10, 0 = off)
   --stall-action notify|nudge  notify you (default), or also restart the stalled turn
+  --permission-mode ask|allow-all  allow-all answers every permission prompt with "allow" by
+                           itself (git push is still refused); the dashboard has a switch
+  --agent-models <agent=model,...>  a model per agent, e.g. kit=haiku,marlow=opus (config.json
+                           "models": {"kit": "haiku"}); any engine
 
  sim backend
   --speed <x>              speed multiplier (default 1)

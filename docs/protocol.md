@@ -29,7 +29,7 @@
 - <a id="backendname"></a>**BackendName**: `sim`, `claude`, `codex`
 - <a id="authstatus"></a>**AuthStatus**: `ok`, `failed`, `unknown`, `checking` - `failed` must be shown loudly (in-world banner): the claude backend cannot run.
 
-Exact option labels: merge decisions use `Merge`, `Request changes`, `Reject`; permission decisions use `Allow once`, `Always allow for this agent`, `Deny`. Question decisions use agent-supplied options (may be empty: free text).
+Exact option labels: merge decisions use `Merge`, `Request changes`, `Reject`; permission decisions use `Allow once`, `Always allow for this agent`, `Deny`, `Always allow for every agent`. Question decisions use agent-supplied options (may be empty: free text).
 
 ## Entities
 
@@ -189,6 +189,7 @@ Exact option labels: merge decisions use `Merge`, `Request changes`, `Reject`; p
 | `userName` | string | no | the person the team works for, as the agents address them (UI: "<name> answered") |
 | `language` | string | no | the language the agents talk to the user in: "en" or "it" |
 | `clients` | string[] | no | connected clients by kind, e.g. ["mod", "dashboard"]: tells a dashboard whether the game is connected |
+| `permissionMode` | `ask` \| `allow_all` | no | allow_all: every permission prompt is allowed by itself (git push stays refused) |
 
 ### <a id="agentlogs"></a>AgentLogs
 
@@ -1027,6 +1028,52 @@ Register a local git repo (console: `/repo add <path>`).
   "type": "repo.add",
   "id": "c18",
   "path": "C:\\Projects\\agentcraft\\sandbox\\demo-app"
+}
+```
+
+### `permissions`
+
+See and change the "Always allow" rules and the permission mode (dashboard).
+
+| field | type | required | notes |
+| --- | --- | --- | --- |
+| `id` | string | no | client correlation id; the Foreman answers with `ack` {re: id} |
+| `action` | `list` \| `mode` \| `revoke` \| `clear` | yes | list: the ack result is {mode, rules: [{agentId, key, description}]}. mode: set `mode`. revoke: remove `key` from `agentId` ("*" = every agent). clear: remove every rule of `agentId` (all agents when omitted). |
+| `mode` | `ask` \| `allow_all` | no |  |
+| `agentId` | string | no |  |
+| `key` | string | no |  |
+
+```json
+{
+  "v": 1,
+  "type": "permissions",
+  "id": "c19",
+  "action": "revoke",
+  "agentId": "kit",
+  "key": "Bash:npm install"
+}
+```
+
+### `repo.publish`
+
+Push the repo's base branch to its remote with your own git, optionally as a pull request (dashboard). Agents never push.
+
+| field | type | required | notes |
+| --- | --- | --- | --- |
+| `id` | string | no | client correlation id; the Foreman answers with `ack` {re: id} |
+| `repoId` | string | yes |  |
+| `pr` | boolean | no | also open a pull request (a new branch at the base branch head, pushed, then `gh pr create`; without gh the ack has a compare URL) |
+| `title` | string | no |  |
+| `body` | string | no |  |
+
+```json
+{
+  "v": 1,
+  "type": "repo.publish",
+  "id": "c20",
+  "repoId": "demo-app",
+  "pr": true,
+  "title": "Tags for notes"
 }
 ```
 

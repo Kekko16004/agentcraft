@@ -223,6 +223,7 @@ export const ForemanStatus = z.object({
   userName: z.string().optional().describe('the person the team works for, as the agents address them (UI: "<name> answered")'),
   language: z.string().optional().describe('the language the agents talk to the user in: "en" or "it"'),
   clients: z.array(z.string()).optional().describe('connected clients by kind, e.g. ["mod", "dashboard"]: tells a dashboard whether the game is connected'),
+  permissionMode: z.enum(['ask', 'allow_all']).optional().describe('allow_all: every permission prompt is allowed by itself (git push stays refused)'),
 });
 export type ForemanStatus = z.infer<typeof ForemanStatus>;
 
@@ -400,6 +401,22 @@ export const DiffRequestMsg = z.object({
   worktree: Id.describe('worktree id (e.g. "kit-t2"); an agent id resolves to that agent\'s current worktree'),
 });
 export const RepoAddMsg = z.object({ ...envelope('repo.add'), path: z.string().min(1) });
+export const PermissionsMsg = z.object({
+  ...envelope('permissions'),
+  action: z
+    .enum(['list', 'mode', 'revoke', 'clear'])
+    .describe('list: the ack result is {mode, rules: [{agentId, key, description}]}. mode: set `mode`. revoke: remove `key` from `agentId` ("*" = every agent). clear: remove every rule of `agentId` (all agents when omitted).'),
+  mode: z.enum(['ask', 'allow_all']).optional(),
+  agentId: z.string().optional(),
+  key: z.string().optional(),
+});
+export const RepoPublishMsg = z.object({
+  ...envelope('repo.publish'),
+  repoId: Id,
+  pr: z.boolean().optional().describe('also open a pull request (a new branch at the base branch head, pushed, then `gh pr create`; without gh the ack has a compare URL)'),
+  title: z.string().optional(),
+  body: z.string().optional(),
+});
 
 export const ClientMessage = z.discriminatedUnion('type', [
   HelloMsg,
@@ -410,6 +427,8 @@ export const ClientMessage = z.discriminatedUnion('type', [
   AgentActionMsg,
   DiffRequestMsg,
   RepoAddMsg,
+  PermissionsMsg,
+  RepoPublishMsg,
 ]);
 export type ClientMessage = z.infer<typeof ClientMessage>;
 
@@ -483,6 +502,8 @@ export const CLIENT_MESSAGES = {
   'agent.action': { schema: AgentActionMsg, doc: 'Pause/resume/stop an agent, or spawn (activate) an off-shift worker.' },
   'diff.request': { schema: DiffRequestMsg, doc: 'Ask for the structured diff of a worktree. Answered with `diff` (same requestId).' },
   'repo.add': { schema: RepoAddMsg, doc: 'Register a local git repo (console: `/repo add <path>`).' },
+  permissions: { schema: PermissionsMsg, doc: 'See and change the "Always allow" rules and the permission mode (dashboard).' },
+  'repo.publish': { schema: RepoPublishMsg, doc: "Push the repo's base branch to its remote with your own git, optionally as a pull request (dashboard). Agents never push." },
 } as const;
 
 export const ENTITY_SCHEMAS = {
@@ -506,4 +527,4 @@ export const ENTITY_SCHEMAS = {
 /** Merge decision option labels (exact strings). */
 export const MERGE_OPTIONS = ['Merge', 'Request changes', 'Reject'] as const;
 /** Permission decision option labels (exact strings). */
-export const PERMISSION_OPTIONS = ['Allow once', 'Always allow for this agent', 'Deny'] as const;
+export const PERMISSION_OPTIONS = ['Allow once', 'Always allow for this agent', 'Deny', 'Always allow for every agent'] as const;

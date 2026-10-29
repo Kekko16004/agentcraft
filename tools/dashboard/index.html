@@ -29,6 +29,7 @@
     <button data-view="tasks"><span data-i18n="nav.tasks">Task</span><i class="count" id="cnt-tasks"></i></button>
     <button data-view="decisions"><span data-i18n="nav.decisions">Decisioni</span><i class="count warn" id="cnt-decisions"></i></button>
     <button data-view="browser"><span data-i18n="nav.browser">Browser</span><i class="count" id="cnt-urls"></i></button>
+    <button data-view="permissions"><span data-i18n="nav.permissions">Permessi</span></button>
     <button data-view="memory"><span data-i18n="nav.memory">Memoria</span></button>
     <button data-view="repos"><span data-i18n="nav.repos">Repo</span></button>
     <button data-view="services"><span data-i18n="nav.services">Servizi</span></button>
@@ -87,6 +88,19 @@
       <div class="found" id="found-urls"></div>
       <div class="frame-wrap"><iframe id="frame" title="browser" referrerpolicy="no-referrer"></iframe></div>
       <div class="hint muted" data-i18n="browser.hint"></div>
+    </section>
+
+    <!-- permissions -->
+    <section class="view" id="view-permissions" hidden>
+      <div class="panel">
+        <div class="panel-head"><b data-i18n="p.mode">Modalità permessi</b></div>
+        <label class="switch"><input type="checkbox" id="allow-all"><span data-i18n="p.allowAll">Consenti tutto: gli agenti non chiedono più il permesso</span></label>
+        <div class="hint muted" data-i18n="p.allowAllHint"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><b data-i18n="p.rules">Regole "Consenti sempre"</b><button class="btn small ghost danger" id="rules-clear" data-i18n="p.clearAll">Revoca tutte</button></div>
+        <div id="rules"></div>
+      </div>
     </section>
 
     <!-- memory -->
@@ -183,6 +197,9 @@
               <div class="picks col" id="codex-mcp"></div>
             </div>
           </div>
+          <h3 data-i18n="s.models">Modello per agente</h3>
+          <div class="models" id="agent-models"></div>
+          <datalist id="model-list"><option value="opus"><option value="sonnet"><option value="haiku"><option value="fable"></datalist>
           <details class="adv">
             <summary data-i18n="s.advanced">Avanzate</summary>
             <div class="form">
